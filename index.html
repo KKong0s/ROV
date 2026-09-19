@@ -11,22 +11,33 @@
 <body>
     <header class="header">
         <h1>ROV Hero Tracker</h1>
-        <p class="subtitle">เช็คฮีโร่ที่เล่นไปแล้ว</p>
+        <p class="subtitle">เช็คฮีโร่ที่เล่นไปแล้ว บันทึกอัตโนมัติ</p>
     </header>
 
     <main class="container">
-        <!-- Progress Section -->
+        <!-- Progress & Top Reset Section -->
         <div class="progress-section">
-            <div class="stats" id="stats" aria-live="polite">เล่นไปแล้ว 0 / 128 ตัว (0%)</div>
+            <div class="progress-header">
+                <div class="stats-info">
+                    <div class="stats" id="stats" aria-live="polite">เล่นไปแล้ว 0 / 128 ตัว (0%)</div>
+                </div>
+                <button id="reset-btn" class="top-reset-btn" aria-haspopup="dialog" title="ล้างข้อมูลฮีโร่ที่เล่นแล้วทั้งหมด">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15.5-6.4L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.4L3 16"/><path d="M3 21v-5h5"/></svg>
+                    <span>รีเซ็ต</span>
+                </button>
+            </div>
             <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
                 <div class="progress-fill" id="progress-fill"></div>
             </div>
         </div>
 
-        <!-- Search -->
+        <!-- Search Bar (High Visibility UI) -->
         <div class="search-container">
-            <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-            <input type="text" id="search-input" placeholder="ค้นหาฮีโร่... (กด / เพื่อค้นหา)" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="ค้นหาฮีโร่">
+            <svg class="search-icon" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="m21 21-4.35-4.35"/>
+            </svg>
+            <input type="text" id="search-input" placeholder="🔍 ค้นหาฮีโร่... (เช่น ทมิฬ, แวน, แบทแมน)" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="ค้นหาฮีโร่">
             <button id="clear-search" class="clear-search" title="ล้างการค้นหา" aria-label="ล้างการค้นหา">&times;</button>
         </div>
 
@@ -56,11 +67,6 @@
             <div class="empty-icon" aria-hidden="true">🔍</div>
             <p>ไม่พบฮีโร่ที่ค้นหา</p>
         </div>
-
-        <!-- Reset Button -->
-        <div class="reset-section">
-            <button id="reset-btn" class="reset-btn" aria-haspopup="dialog">🔄 รีเซ็ตทั้งหมด</button>
-        </div>
     </main>
 
     <!-- Reset Confirmation Modal -->
@@ -78,7 +84,7 @@
 
     <!-- Footer -->
     <footer class="footer">
-        <p>คลิกที่ฮีโร่เพื่อเช็คว่าเล่นแล้ว • ข้อมูลบันทึกอัตโนมัติ</p>
+        <p>แตะที่ฮีโร่เพื่อเช็คว่าเล่นแล้ว • ตัวที่ติ๊กจะขึ้นด้านบนอัตโนมัติ</p>
     </footer>
 
     <!-- Scripts -->
