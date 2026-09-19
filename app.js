@@ -1,7 +1,8 @@
 /**
- * ROV Global Ban-Pick Tracker — Multi-Team Application Logic
+ * ROV Global Ban-Pick Tracker — Multi-Team & Live Sync Application Logic
  * บันทึกฮีโร่ที่แต่ละทีมเลือกเล่นไปแล้ว เพื่อใช้ในการแบนไม่ให้เล่นซ้ำ (Global Ban Rule)
- * รองรับหลายทีม, เพิ่ม/แก้ไข/ลบทีม, ดูสรุปทุกทีม, และสลับดูแต่ละทีมได้อย่างรวดเร็ว
+ * รองรับหลายทีม, สลับดูแต่ละทีม, ดูกระดานสรุปทุกทีม
+ * ระบบ Live Sync (PeerJS WebRTC P2P) ซิงค์ข้ามมือถือ/คอมฯ แบบ Real-time ไม่ต้องมีเซิร์ฟเวอร์
  */
 
 // ─── State Management ───
@@ -19,7 +20,33 @@ let state = {
 let currentSearch = '';
 let currentRole = 'all';
 let currentStatus = 'all';
-let editingTeamId = null; // สำหรับกรณีเปิด modal แก้ไขชื่อทีม
+let editingTeamId = null;
+
+// ─── Live Sync (PeerJS P2P) State ───
+const PEER_PREFIX = 'rov-ban-room-';
+let peer = null;
+let currentRoomId = null;
+let isHost = false;
+let connections = []; // สำหรับโฮสต์: เก็บ conn ทุกคน / สำหรับเกสต์: เก็บ conn โฮสต์
+let myControlledTeamId = 'all'; // 'all' (กรรมการ) หรือ team.id ที่ตัวเองรับผิดชอบ
+
+// ─── Toast Notifications ───
+function showToast(message, icon = 'ℹ️', duration = 3200) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  const toast = document.createElement('div');
+  toast.className = 'toast-message';
+  toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)';
+    toast.style.transition = 'all 0.3s ease';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
 
 // ─── LocalStorage Persistence & Migration ───
 function loadState() {
@@ -29,7 +56,6 @@ function loadState() {
       const parsed = JSON.parse(stored);
       if (parsed && Array.isArray(parsed.teams) && parsed.teams.length > 0) {
         state = parsed;
-        // ตรวจสอบว่า activeTeamId มีอยู่จริง
         if (!state.teams.some(t => t.id === state.activeTeamId)) {
           state.activeTeamId = state.teams[0].id;
         }
@@ -37,7 +63,7 @@ function loadState() {
       }
     }
 
-    // ตรวจสอบข้อมูลเก่า (Legacy single-team data) เพื่อทำ Auto-migration
+    // Auto-migration จากเวอร์ชันเดี่ยวเก่า
     const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
     if (legacy) {
       const parsedLegacy = JSON.parse(legacy);
@@ -97,15 +123,20 @@ function addTeam(name) {
   saveState();
   renderTeamsBar();
   renderHeroes();
+  updateTeamSelectOptions();
+  broadcastState(`เพิ่มทีม "${cleanName}" เข้าระบบ`);
 }
 
 function renameTeam(id, newName) {
   const team = state.teams.find(t => t.id === id);
   if (team) {
+    const oldName = team.name;
     team.name = newName.trim() || team.name;
     saveState();
     renderTeamsBar();
     updateProgress();
+    updateTeamSelectOptions();
+    broadcastState(`เปลี่ยนชื่อทีม "${oldName}" เป็น "${team.name}"`);
   }
 }
 
@@ -114,6 +145,9 @@ function deleteTeam(id) {
     alert('ต้องมีอย่างน้อย 1 ทีมในระบบ');
     return;
   }
+  const deletedTeam = state.teams.find(t => t.id === id);
+  const deletedName = deletedTeam ? deletedTeam.name : '';
+
   state.teams = state.teams.filter(t => t.id !== id);
   if (state.activeTeamId === id) {
     state.activeTeamId = state.teams[0].id;
@@ -121,6 +155,8 @@ function deleteTeam(id) {
   saveState();
   renderTeamsBar();
   renderHeroes();
+  updateTeamSelectOptions();
+  broadcastState(`ลบทีม "${deletedName}" ออกจากระบบ`);
 }
 
 function switchTeam(id) {
@@ -138,6 +174,7 @@ function resetActiveTeam() {
     saveState();
     renderTeamsBar();
     renderHeroes();
+    broadcastState(`ล้างข้อมูลฮีโร่ของ "${team.name}" แล้ว`);
   }
 }
 
@@ -148,14 +185,29 @@ function resetAllTeams() {
   saveState();
   renderTeamsBar();
   renderHeroes();
+  broadcastState(`ล้างข้อมูลฮีโร่ทุกทีม (เริ่มแมตช์ใหม่)`);
 }
 
-// ─── Toggle Hero (สำหรับทีมที่กำลังเลือก) ───
+// ─── Toggle Hero (พร้อมการจำกัดสิทธิ์ทีมที่คุม) ───
 function toggleHero(heroId) {
+  // ตรวจสอบสิทธิ์การคุมทีม (Team Lock)
+  if (myControlledTeamId !== 'all' && myControlledTeamId !== state.activeTeamId) {
+    const myTeam = state.teams.find(t => t.id === myControlledTeamId);
+    const targetTeam = state.teams.find(t => t.id === state.activeTeamId);
+    showToast(
+      `คุณได้รับสิทธิ์คุมเฉพาะ "${myTeam ? myTeam.name : 'ทีมของคุณ'}" ไม่สามารถแก้ไข "${targetTeam ? targetTeam.name : 'ทีมนี้'}" ได้`,
+      '🔒',
+      3500
+    );
+    return;
+  }
+
   const team = getActiveTeam();
   if (!team.heroes) team.heroes = [];
 
   let isNowPlayed = false;
+  let heroObj = HEROES.find(h => h.id === heroId);
+  let heroName = heroObj ? heroObj.name : heroId;
 
   // กฎเฉพาะของ Flowborn: แข่งขันจริงในแมตช์จะหยิบได้เพียง 1 สายต่อทีม
   if (heroId === 'flowborn_carry') {
@@ -163,11 +215,9 @@ function toggleHero(heroId) {
     const mageIdx = team.heroes.indexOf('flowborn_mage');
 
     if (carryIdx !== -1) {
-      // ติ๊กออก (ปลดแบน)
       team.heroes.splice(carryIdx, 1);
       isNowPlayed = false;
     } else {
-      // สลับสายหรือเพิ่มใหม่
       if (mageIdx !== -1) team.heroes.splice(mageIdx, 1);
       team.heroes.push('flowborn_carry');
       isNowPlayed = true;
@@ -177,11 +227,9 @@ function toggleHero(heroId) {
     const mageIdx = team.heroes.indexOf('flowborn_mage');
 
     if (mageIdx !== -1) {
-      // ติ๊กออก (ปลดแบน)
       team.heroes.splice(mageIdx, 1);
       isNowPlayed = false;
     } else {
-      // สลับสายหรือเพิ่มใหม่
       if (carryIdx !== -1) team.heroes.splice(carryIdx, 1);
       team.heroes.push('flowborn_mage');
       isNowPlayed = true;
@@ -198,8 +246,14 @@ function toggleHero(heroId) {
   }
 
   saveState();
-  renderTeamsBar(); // อัปเดตตัวเลขบนแท็บทีม
+  renderTeamsBar();
   renderWithAnimation(heroId, isNowPlayed);
+
+  // Broadcast ให้เครื่องอื่นทราบแบบ Real-time
+  const actionText = isNowPlayed
+    ? `${team.name} แบน ${heroName} แล้ว`
+    : `${team.name} ปลดแบน ${heroName}`;
+  broadcastState(actionText);
 }
 
 // ─── Debounce ───
@@ -311,13 +365,11 @@ function getFilteredHeroes() {
     const aPlayed = playedSet.has(a.id);
     const bPlayed = playedSet.has(b.id);
 
-    // ถ้าดู "ทั้งหมด": ให้ตัวที่เล่นแล้วขึ้นมาก่อนตัวที่ยังไม่เล่น
     if (currentStatus === 'all') {
       if (aPlayed && !bPlayed) return -1;
       if (!aPlayed && bPlayed) return 1;
     }
 
-    // ในแต่ละกลุ่ม ให้เรียงลำดับชื่อ A-Z อย่างเป็นระเบียบ
     return a.name.localeCompare(b.name, 'th');
   });
 
@@ -333,7 +385,6 @@ function renderHeroes(animatingId = null, isNowPlayed = false) {
   const playedSet = getActiveHeroesSet();
   const filtered = getFilteredHeroes();
 
-  // อัปเดต empty state
   if (filtered.length === 0) {
     grid.innerHTML = '';
     if (emptyState) emptyState.style.display = 'block';
@@ -342,14 +393,12 @@ function renderHeroes(animatingId = null, isNowPlayed = false) {
   }
   if (emptyState) emptyState.style.display = 'none';
 
-  // สร้างการ์ด
   const fragment = document.createDocumentFragment();
 
   filtered.forEach(hero => {
     const isPlayed = playedSet.has(hero.id);
     const card = document.createElement('div');
 
-    // pop-animate จะใส่เฉพาะตัวที่เพิ่งถูกกดติ๊กเท่านั้น
     const isTargetAnimating = (hero.id === animatingId && isNowPlayed);
     card.className = 'hero-card' + (isPlayed ? ' played' : '') + (isTargetAnimating ? ' pop-animate' : '');
     card.dataset.id = hero.id;
@@ -408,17 +457,14 @@ function renderWithAnimation(toggledId, isNowPlayed) {
     return;
   }
 
-  // 1. FIRST: บันทึกตำแหน่งเดิมของการ์ดทุกใบก่อนขยับ
   const prevPositions = new Map();
   const currentCards = grid.querySelectorAll('.hero-card');
   currentCards.forEach(card => {
     prevPositions.set(card.dataset.id, card.getBoundingClientRect());
   });
 
-  // 2. LAST: เรนเดอร์ตำแหน่งใหม่ใน DOM
   renderHeroes(toggledId, isNowPlayed);
 
-  // 3. INVERT & PLAY: คำนวณระยะทางที่เปลี่ยนไป และเลื่อนการ์ดอย่างนุ่มนวล
   const nextCards = grid.querySelectorAll('.hero-card');
   nextCards.forEach(card => {
     const id = card.dataset.id;
@@ -445,7 +491,6 @@ function renderWithAnimation(toggledId, isNowPlayed) {
     }
   });
 
-  // 4. ลบคลาส pop-animate ออกเมื่อแอนิเมชันเด้งของตัวที่กดจบลง
   if (toggledId && isNowPlayed) {
     setTimeout(() => {
       const targetCard = grid.querySelector(`.hero-card[data-id="${toggledId}"]`);
@@ -457,14 +502,12 @@ function renderWithAnimation(toggledId, isNowPlayed) {
 }
 
 // ─── Overview Modal (ดูสรุปฮีโร่ทุกทีม) ───
-function openOverviewModal() {
-  const overlay = document.getElementById('overview-modal-overlay');
+function renderOverviewModal() {
   const container = document.getElementById('overview-container');
-  if (!overlay || !container) return;
+  if (!container) return;
 
   container.innerHTML = '';
 
-  // Map ID -> Hero Object เพื่อค้นหารูปและชื่อได้ไว
   const heroMap = new Map();
   HEROES.forEach(h => heroMap.set(h.id, h));
 
@@ -503,7 +546,13 @@ function openOverviewModal() {
 
     container.appendChild(card);
   });
+}
 
+function openOverviewModal() {
+  const overlay = document.getElementById('overview-modal-overlay');
+  if (!overlay) return;
+
+  renderOverviewModal();
   overlay.style.display = '';
   overlay.classList.add('active');
   document.body.classList.add('no-scroll');
@@ -540,7 +589,6 @@ function openTeamModal(mode = 'add', team = null) {
     editingTeamId = team.id;
     title.textContent = `✏️ แก้ไขทีม: ${team.name}`;
     input.value = team.name;
-    // แสดงปุ่มลบ ถ้ามีมากกว่า 1 ทีม
     if (deleteWrapper) {
       deleteWrapper.style.display = (state.teams.length > 1) ? 'block' : 'none';
     }
@@ -602,12 +650,297 @@ function hideResetModal() {
   }
 }
 
-// ─── Event Listeners ───
+// ─── Live Sync (PeerJS P2P) Core Engine ───
+
+function generateRoomCode() {
+  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+  let code = '';
+  for (let i = 0; i < 4; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return 'ROV-' + code;
+}
+
+function updateSyncUI() {
+  const statusBtn = document.getElementById('sync-status-btn');
+  const statusText = document.getElementById('sync-status-text');
+  const connectedSec = document.getElementById('sync-connected-section');
+  const disconnectedSec = document.getElementById('sync-disconnected-section');
+  const codeVal = document.getElementById('room-code-val');
+  const peersCount = document.getElementById('room-peers-count');
+  const roleBadge = document.getElementById('room-role-badge');
+
+  if (currentRoomId) {
+    const totalCount = isHost ? connections.length + 1 : 2;
+    if (statusBtn) {
+      statusBtn.className = 'sync-status-pill online';
+    }
+    if (statusText) {
+      statusText.textContent = `🟢 ห้อง: ${currentRoomId} (${totalCount} เครื่อง)`;
+    }
+    if (connectedSec) connectedSec.style.display = 'block';
+    if (disconnectedSec) disconnectedSec.style.display = 'none';
+    if (codeVal) codeVal.textContent = currentRoomId;
+    if (peersCount) peersCount.textContent = `👥 ผู้เชื่อมต่อ: ${totalCount} เครื่อง`;
+    if (roleBadge) {
+      roleBadge.textContent = isHost ? '👑 โฮสต์ (Host)' : '🤝 ผู้ร่วมห้อง (Member)';
+    }
+  } else {
+    if (statusBtn) {
+      statusBtn.className = 'sync-status-pill offline';
+    }
+    if (statusText) {
+      statusText.textContent = '🔴 ใช้งานในเครื่อง (ออฟไลน์)';
+    }
+    if (connectedSec) connectedSec.style.display = 'none';
+    if (disconnectedSec) disconnectedSec.style.display = 'grid';
+  }
+}
+
+function updateTeamSelectOptions() {
+  const select = document.getElementById('my-team-select');
+  if (!select) return;
+
+  const currentVal = select.value || 'all';
+  select.innerHTML = '<option value="all">👑 ผู้ดูแล / กรรมการ (กดแบนได้ทุกทีม)</option>';
+
+  state.teams.forEach(team => {
+    const opt = document.createElement('option');
+    opt.value = team.id;
+    opt.textContent = `🛡️ ผู้ดูแลทีม: ${team.name}`;
+    if (team.id === currentVal) opt.selected = true;
+    select.appendChild(opt);
+  });
+}
+
+function createRoom() {
+  if (typeof Peer === 'undefined') {
+    alert('กำลังโหลดระบบเครือข่าย กรุณาลองใหม่อีกครั้งใน 2-3 วินาที');
+    return;
+  }
+
+  const roomCode = generateRoomCode();
+  const peerId = PEER_PREFIX + roomCode.toLowerCase();
+
+  showToast(`กำลังสร้างห้อง ${roomCode}...`, '⏳');
+
+  if (peer) {
+    peer.destroy();
+  }
+
+  peer = new Peer(peerId);
+
+  peer.on('open', (id) => {
+    isHost = true;
+    currentRoomId = roomCode;
+    connections = [];
+    updateSyncUI();
+    showToast(`สร้างห้อง ${roomCode} สำเร็จ!`, '🎉');
+  });
+
+  peer.on('connection', (conn) => {
+    connections.push(conn);
+
+    conn.on('open', () => {
+      // ส่งข้อมูลทีมทั้งหมดให้ผู้เข้าร่วมใหม่
+      conn.send({
+        type: 'INIT_STATE',
+        teams: state.teams,
+        actionDesc: 'เชื่อมต่อห้องแข่งสดสำเร็จ'
+      });
+      updateSyncUI();
+      showToast(`มีเครื่องใหม่เข้าร่วมห้อง (${connections.length + 1} เครื่อง)`, '👥');
+    });
+
+    conn.on('data', (data) => {
+      handleIncomingData(data, conn);
+    });
+
+    conn.on('close', () => {
+      connections = connections.filter(c => c !== conn);
+      updateSyncUI();
+      showToast(`มีเครื่องออกจากห้อง (เหลือ ${connections.length + 1} เครื่อง)`, 'ℹ️');
+    });
+
+    conn.on('error', (err) => {
+      console.warn('Connection error:', err);
+    });
+  });
+
+  peer.on('error', (err) => {
+    console.error('Peer error:', err);
+    if (err.type === 'unavailable-id') {
+      // สุ่มรหัสใหม่หากซ้ำ
+      setTimeout(createRoom, 300);
+    } else {
+      showToast('เกิดข้อผิดพลาดในการสร้างห้อง: ' + err.type, '⚠️');
+    }
+  });
+}
+
+function joinRoom(targetCode) {
+  if (!targetCode) return;
+  const cleanCode = targetCode.trim().toUpperCase();
+  const peerId = PEER_PREFIX + cleanCode.toLowerCase();
+
+  if (typeof Peer === 'undefined') {
+    alert('กำลังโหลดระบบเครือข่าย กรุณาลองใหม่อีกครั้งใน 2-3 วินาที');
+    return;
+  }
+
+  showToast(`กำลังเชื่อมต่อห้อง ${cleanCode}...`, '⏳');
+
+  if (peer) {
+    peer.destroy();
+  }
+
+  peer = new Peer();
+
+  peer.on('open', () => {
+    const conn = peer.connect(peerId, { reliable: true });
+
+    conn.on('open', () => {
+      isHost = false;
+      currentRoomId = cleanCode;
+      connections = [conn];
+      updateSyncUI();
+      showToast(`เข้าร่วมห้อง ${cleanCode} สำเร็จ!`, '🎉');
+      closeSyncModal();
+    });
+
+    conn.on('data', (data) => {
+      handleIncomingData(data, conn);
+    });
+
+    conn.on('close', () => {
+      disconnectRoom(false);
+      showToast(`การเชื่อมต่อกับห้อง ${cleanCode} สิ้นสุดลง`, '⚠️');
+    });
+
+    conn.on('error', (err) => {
+      console.error('Join conn error:', err);
+      showToast('ไม่สามารถเชื่อมต่อห้องนี้ได้ ตรวจสอบรหัสห้องอีกครั้ง', '⚠️');
+    });
+  });
+
+  peer.on('error', (err) => {
+    console.error('Peer error:', err);
+    showToast('ไม่พบห้องที่ระบุ หรือห้องถูกปิดแล้ว', '⚠️');
+  });
+}
+
+function disconnectRoom(manual = true) {
+  if (peer) {
+    peer.destroy();
+    peer = null;
+  }
+  connections = [];
+  currentRoomId = null;
+  isHost = false;
+  updateSyncUI();
+  if (manual) showToast('ออกจากห้องแล้ว (กลับสู่โหมดออฟไลน์)', 'ℹ️');
+}
+
+function broadcastState(actionDesc = '') {
+  if (!currentRoomId) return;
+
+  const payload = {
+    type: 'SYNC_STATE',
+    teams: state.teams,
+    actionDesc,
+    sourceTeamId: state.activeTeamId
+  };
+
+  if (isHost) {
+    connections.forEach(conn => {
+      if (conn && conn.open) {
+        conn.send(payload);
+      }
+    });
+  } else {
+    if (connections[0] && connections[0].open) {
+      connections[0].send(payload);
+    }
+  }
+}
+
+function handleIncomingData(data, senderConn) {
+  if (!data || !data.type) return;
+
+  if (data.type === 'SYNC_STATE' || data.type === 'INIT_STATE') {
+    if (Array.isArray(data.teams)) {
+      state.teams = data.teams;
+      saveState();
+      renderTeamsBar();
+      renderHeroes();
+      updateProgress();
+      updateTeamSelectOptions();
+      if (document.getElementById('overview-modal-overlay')?.classList.contains('active')) {
+        renderOverviewModal();
+      }
+    }
+
+    if (data.actionDesc) {
+      showToast(data.actionDesc, '⚔️');
+    }
+
+    // ถ้าโฮสต์ได้รับข้อมูลจากลูกห้อง ให้กระจาย (Relay) ไปยังลูกห้องคนอื่นๆ ทันที
+    if (isHost && data.type === 'SYNC_STATE') {
+      connections.forEach(conn => {
+        if (conn !== senderConn && conn.open) {
+          conn.send(data);
+        }
+      });
+    }
+  }
+}
+
+function copyRoomInviteLink() {
+  if (!currentRoomId) return;
+  const baseUrl = window.location.origin + window.location.pathname;
+  const inviteUrl = `${baseUrl}?room=${currentRoomId}`;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(inviteUrl).then(() => {
+      showToast(`คัดลอกลิงก์ห้อง ${currentRoomId} แล้ว! ส่งให้เพื่อนเปิดได้ทันที`, '📋');
+    }).catch(() => {
+      prompt('คัดลอกลิงก์นี้ส่งให้เพื่อนได้เลย:', inviteUrl);
+    });
+  } else {
+    prompt('คัดลอกลิงก์นี้ส่งให้เพื่อนได้เลย:', inviteUrl);
+  }
+}
+
+// ─── Modal Live Sync Handlers ───
+function openSyncModal() {
+  const overlay = document.getElementById('sync-modal-overlay');
+  if (!overlay) return;
+
+  updateSyncUI();
+  updateTeamSelectOptions();
+  overlay.style.display = '';
+  overlay.classList.add('active');
+  document.body.classList.add('no-scroll');
+}
+
+function closeSyncModal() {
+  const overlay = document.getElementById('sync-modal-overlay');
+  if (overlay) {
+    overlay.classList.remove('active');
+    document.body.classList.remove('no-scroll');
+    setTimeout(() => {
+      if (!overlay.classList.contains('active')) {
+        overlay.style.display = 'none';
+      }
+    }, 300);
+  }
+}
+
+// ─── Setup Event Listeners ───
 function setupEventListeners() {
   const searchInput = document.getElementById('search-input');
   const clearSearchBtn = document.getElementById('clear-search');
 
-  // ค้นหา (debounce 150ms)
   if (searchInput) {
     searchInput.addEventListener('input', debounce((e) => {
       currentSearch = e.target.value;
@@ -615,7 +948,6 @@ function setupEventListeners() {
     }, 150));
   }
 
-  // ล้างการค้นหา
   if (clearSearchBtn) {
     clearSearchBtn.addEventListener('click', () => {
       if (searchInput) {
@@ -638,6 +970,7 @@ function setupEventListeners() {
       hideResetModal();
       closeTeamModal();
       closeOverviewModal();
+      closeSyncModal();
     }
   });
 
@@ -675,26 +1008,18 @@ function setupEventListeners() {
     });
   }
 
-  // ปุ่มเปิด Modal ต่างๆ
+  // Quick Action buttons
   const addTeamBtn = document.getElementById('add-team-btn');
-  if (addTeamBtn) {
-    addTeamBtn.addEventListener('click', () => openTeamModal('add'));
-  }
+  if (addTeamBtn) addTeamBtn.addEventListener('click', () => openTeamModal('add'));
 
   const overviewBtn = document.getElementById('overview-btn');
-  if (overviewBtn) {
-    overviewBtn.addEventListener('click', openOverviewModal);
-  }
+  if (overviewBtn) overviewBtn.addEventListener('click', openOverviewModal);
 
   const closeOverviewBtn = document.getElementById('close-overview-btn');
-  if (closeOverviewBtn) {
-    closeOverviewBtn.addEventListener('click', closeOverviewModal);
-  }
+  if (closeOverviewBtn) closeOverviewBtn.addEventListener('click', closeOverviewModal);
 
   const resetBtn = document.getElementById('reset-btn');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', showResetModal);
-  }
+  if (resetBtn) resetBtn.addEventListener('click', showResetModal);
 
   // Reset Modal buttons
   const modalCancel = document.getElementById('modal-cancel');
@@ -754,6 +1079,46 @@ function setupEventListeners() {
     });
   }
 
+  // Live Sync Buttons & Listeners
+  const syncStatusBtn = document.getElementById('sync-status-btn');
+  if (syncStatusBtn) syncStatusBtn.addEventListener('click', openSyncModal);
+
+  const closeSyncBtn = document.getElementById('close-sync-btn');
+  if (closeSyncBtn) closeSyncBtn.addEventListener('click', closeSyncModal);
+
+  const createRoomBtn = document.getElementById('create-room-btn');
+  if (createRoomBtn) createRoomBtn.addEventListener('click', createRoom);
+
+  const joinRoomBtn = document.getElementById('join-room-btn');
+  const joinRoomInput = document.getElementById('join-room-input');
+  if (joinRoomBtn && joinRoomInput) {
+    joinRoomBtn.addEventListener('click', () => {
+      joinRoom(joinRoomInput.value);
+    });
+    joinRoomInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') joinRoom(joinRoomInput.value);
+    });
+  }
+
+  const copyRoomLinkBtn = document.getElementById('copy-room-link-btn');
+  if (copyRoomLinkBtn) copyRoomLinkBtn.addEventListener('click', copyRoomInviteLink);
+
+  const disconnectRoomBtn = document.getElementById('disconnect-room-btn');
+  if (disconnectRoomBtn) disconnectRoomBtn.addEventListener('click', () => disconnectRoom(true));
+
+  const myTeamSelect = document.getElementById('my-team-select');
+  if (myTeamSelect) {
+    myTeamSelect.addEventListener('change', (e) => {
+      myControlledTeamId = e.target.value;
+      if (myControlledTeamId === 'all') {
+        showToast('คุณมีสิทธิ์จัดการและแบนฮีโร่ได้ทุกทีม', '👑');
+      } else {
+        const team = state.teams.find(t => t.id === myControlledTeamId);
+        showToast(`คุณถูกตั้งสิทธิ์ให้คุมทีม "${team ? team.name : myControlledTeamId}"`, '🎯');
+      }
+    });
+  }
+
   // คลิกพื้นหลัง modal เพื่อปิด
   const modalOverlay = document.getElementById('modal-overlay');
   if (modalOverlay) {
@@ -775,6 +1140,13 @@ function setupEventListeners() {
       if (e.target === overviewModalOverlay) closeOverviewModal();
     });
   }
+
+  const syncModalOverlay = document.getElementById('sync-modal-overlay');
+  if (syncModalOverlay) {
+    syncModalOverlay.addEventListener('click', (e) => {
+      if (e.target === syncModalOverlay) closeSyncModal();
+    });
+  }
 }
 
 // ─── Initialization ───
@@ -788,4 +1160,19 @@ document.addEventListener('DOMContentLoaded', () => {
   setupEventListeners();
   renderTeamsBar();
   renderHeroes();
+  updateSyncUI();
+  updateTeamSelectOptions();
+
+  // ตรวจสอบ URL Query Parameter ว่ามี ?room=XXXX มาด้วยหรือไม่ (Auto-Join)
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam) {
+      setTimeout(() => {
+        joinRoom(roomParam);
+      }, 500);
+    }
+  } catch (e) {
+    console.warn('Cannot parse URL query params:', e);
+  }
 });
