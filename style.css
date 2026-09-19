@@ -528,6 +528,12 @@ body.no-scroll {
   white-space: nowrap;
 }
 
+.hero-card.played[data-ban-label] .hero-img-wrapper::after {
+  content: attr(data-ban-label);
+  font-size: 0.72rem;
+  padding: 0.28rem 0.45rem;
+}
+
 /* ONLY run checkPop animation on the specific card that was just ticked! */
 .hero-card.pop-animate .hero-img-wrapper::after {
   animation: checkPop 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;

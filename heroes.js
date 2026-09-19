@@ -1,8 +1,8 @@
 /**
- * ROV Hero Database — ข้อมูลฮีโร่ทั้งหมด 128 ตัว
+ * ROV Hero Database — ข้อมูลฮีโร่ทั้งหมด 130 ตัว
  * รูปโปรไฟล์ตัวละครจริงและเป็นปัจจุบัน (ดึงจาก https://rovmeta.com/heroes)
  * ออฟไลน์ 100% รูปภาพเก็บในโฟลเดอร์ images/ โหลดไว คมชัด
- * อัปเดตล่าสุด: กันยายน 2026 (รวมฮีโร่ใหม่ ทมิฬ และ Evita)
+ * อัปเดตล่าสุด: กันยายน 2026 (รวมฮีโร่ใหม่ ทมิฬ, Evita, และ Flowborn Carry/Mage)
  */
 const HEROES = [
   { id:"airi", name:"Airi", role:"Assassin", role2:"Fighter", image:"images/airi.jpg", aliases:["ไอริ"] },
@@ -46,6 +46,8 @@ const HEROES = [
   { id:"evita", name:"Evita (เอวิต้า)", role:"Mage", role2:"Support", image:"images/evita.jpg", aliases:["เอวิต้า","Evita","10ปี","ครบรอบ 10 ปี"] },
   { id:"fennik", name:"Fennik", role:"Carry", role2:null, image:"images/fennik.png", aliases:["เฟนนิค"] },
   { id:"florentino", name:"Florentino", role:"Fighter", role2:"Assassin", image:"images/florentino.png", aliases:["ฟลอ","ฟลอเรนติโน่"] },
+  { id:"flowborn_carry", name:"Flowborn (Carry)", role:"Carry", role2:null, image:"images/flowborn_carry.jpg", aliases:["โฟลว์บอร์น","โฟลบอน","Flowborn","flowborn","แครี่","ยิงไกล","ธนู","หยวนหลิวจือจื่อ","元流之子"] },
+  { id:"flowborn_mage", name:"Flowborn (Mage)", role:"Mage", role2:null, image:"images/flowborn_mage.jpg", aliases:["โฟลว์บอร์น","โฟลบอน","Flowborn","flowborn","เมจ","เวท","คทา","หยวนหลิวจือจื่อ","元流之子"] },
   { id:"gildur", name:"Gildur", role:"Mage", role2:"Tank", image:"images/gildur.png", aliases:["กิลเดอร์"] },
   { id:"goverra", name:"Goverra", role:"Mage", role2:null, image:"images/goverra.png", aliases:["โกเวร่า"] },
   { id:"grakk", name:"Grakk", role:"Tank", role2:"Support", image:"images/grakk.png", aliases:["กรัก"] },

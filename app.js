@@ -73,7 +73,14 @@ function getActiveTeam() {
 
 function getActiveHeroesSet() {
   const team = getActiveTeam();
-  return new Set(team.heroes || []);
+  const set = new Set(team.heroes || []);
+  // กฎ Global Ban: หากทีมเล่น Flowborn สายใดสายหนึ่งแล้ว อีกสายหนึ่งจะถูกแบนด้วยทันที
+  if (set.has('flowborn_carry')) {
+    set.add('flowborn_mage');
+  } else if (set.has('flowborn_mage')) {
+    set.add('flowborn_carry');
+  }
+  return set;
 }
 
 function addTeam(name) {
@@ -148,13 +155,46 @@ function toggleHero(heroId) {
   const team = getActiveTeam();
   if (!team.heroes) team.heroes = [];
 
-  const index = team.heroes.indexOf(heroId);
-  const isNowPlayed = (index === -1);
+  let isNowPlayed = false;
 
-  if (isNowPlayed) {
-    team.heroes.push(heroId);
+  // กฎเฉพาะของ Flowborn: แข่งขันจริงในแมตช์จะหยิบได้เพียง 1 สายต่อทีม
+  if (heroId === 'flowborn_carry') {
+    const carryIdx = team.heroes.indexOf('flowborn_carry');
+    const mageIdx = team.heroes.indexOf('flowborn_mage');
+
+    if (carryIdx !== -1) {
+      // ติ๊กออก (ปลดแบน)
+      team.heroes.splice(carryIdx, 1);
+      isNowPlayed = false;
+    } else {
+      // สลับสายหรือเพิ่มใหม่
+      if (mageIdx !== -1) team.heroes.splice(mageIdx, 1);
+      team.heroes.push('flowborn_carry');
+      isNowPlayed = true;
+    }
+  } else if (heroId === 'flowborn_mage') {
+    const carryIdx = team.heroes.indexOf('flowborn_carry');
+    const mageIdx = team.heroes.indexOf('flowborn_mage');
+
+    if (mageIdx !== -1) {
+      // ติ๊กออก (ปลดแบน)
+      team.heroes.splice(mageIdx, 1);
+      isNowPlayed = false;
+    } else {
+      // สลับสายหรือเพิ่มใหม่
+      if (carryIdx !== -1) team.heroes.splice(carryIdx, 1);
+      team.heroes.push('flowborn_mage');
+      isNowPlayed = true;
+    }
   } else {
-    team.heroes.splice(index, 1);
+    // ฮีโร่ทั่วไป
+    const index = team.heroes.indexOf(heroId);
+    isNowPlayed = (index === -1);
+    if (isNowPlayed) {
+      team.heroes.push(heroId);
+    } else {
+      team.heroes.splice(index, 1);
+    }
   }
 
   saveState();
@@ -314,6 +354,25 @@ function renderHeroes(animatingId = null, isNowPlayed = false) {
     card.className = 'hero-card' + (isPlayed ? ' played' : '') + (isTargetAnimating ? ' pop-animate' : '');
     card.dataset.id = hero.id;
     card.setAttribute('role', 'listitem');
+
+    // ข้อความแสตมป์แบนสำหรับ Flowborn
+    if (isPlayed) {
+      const activeTeam = getActiveTeam();
+      const heroesList = activeTeam.heroes || [];
+      if (hero.id === 'flowborn_carry') {
+        if (heroesList.includes('flowborn_carry')) {
+          card.dataset.banLabel = '🚫 แบน (Carry)';
+        } else {
+          card.dataset.banLabel = '🚫 แบนคู่ (ใช้แล้ว)';
+        }
+      } else if (hero.id === 'flowborn_mage') {
+        if (heroesList.includes('flowborn_mage')) {
+          card.dataset.banLabel = '🚫 แบน (Mage)';
+        } else {
+          card.dataset.banLabel = '🚫 แบนคู่ (ใช้แล้ว)';
+        }
+      }
+    }
 
     const firstLetter = hero.name.charAt(0).toUpperCase();
 
