@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0a0a0f">
+    <title>ROV Hero Tracker - เช็คฮีโร่ที่เล่นแล้ว</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚔️</text></svg>">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="header">
+        <h1>ROV Hero Tracker</h1>
+        <p class="subtitle">เช็คฮีโร่ที่เล่นไปแล้ว</p>
+    </header>
+
+    <main class="container">
+        <!-- Progress Section -->
+        <div class="progress-section">
+            <div class="stats" id="stats" aria-live="polite">เล่นไปแล้ว 0 / 128 ตัว (0%)</div>
+            <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+        </div>
+
+        <!-- Search -->
+        <div class="search-container">
+            <svg class="search-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="search-input" placeholder="ค้นหาฮีโร่... (กด / เพื่อค้นหา)" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="ค้นหาฮีโร่">
+            <button id="clear-search" class="clear-search" title="ล้างการค้นหา" aria-label="ล้างการค้นหา">&times;</button>
+        </div>
+
+        <!-- Role Filter -->
+        <div class="filter-bar" id="role-filter" role="group" aria-label="กรองตามตำแหน่ง">
+            <button class="filter-btn active" data-role="all" aria-pressed="true">ทั้งหมด</button>
+            <button class="filter-btn" data-role="Assassin" aria-pressed="false">🗡️ Assassin</button>
+            <button class="filter-btn" data-role="Fighter" aria-pressed="false">⚔️ Fighter</button>
+            <button class="filter-btn" data-role="Mage" aria-pressed="false">🔮 Mage</button>
+            <button class="filter-btn" data-role="Carry" aria-pressed="false">🏹 Carry</button>
+            <button class="filter-btn" data-role="Tank" aria-pressed="false">🛡️ Tank</button>
+            <button class="filter-btn" data-role="Support" aria-pressed="false">💚 Support</button>
+        </div>
+
+        <!-- Status Filter -->
+        <div class="status-filter" id="status-filter" role="group" aria-label="กรองตามสถานะ">
+            <button class="status-btn active" data-status="all" aria-pressed="true">📋 ทั้งหมด</button>
+            <button class="status-btn" data-status="unplayed" aria-pressed="false">⬜ ยังไม่เล่น</button>
+            <button class="status-btn" data-status="played" aria-pressed="false">✅ เล่นแล้ว</button>
+        </div>
+
+        <!-- Hero Grid -->
+        <div id="hero-grid" role="list"></div>
+
+        <!-- Empty State -->
+        <div class="empty-state" id="empty-state" style="display:none" aria-live="polite">
+            <div class="empty-icon" aria-hidden="true">🔍</div>
+            <p>ไม่พบฮีโร่ที่ค้นหา</p>
+        </div>
+
+        <!-- Reset Button -->
+        <div class="reset-section">
+            <button id="reset-btn" class="reset-btn" aria-haspopup="dialog">🔄 รีเซ็ตทั้งหมด</button>
+        </div>
+    </main>
+
+    <!-- Reset Confirmation Modal -->
+    <div class="modal-overlay" id="modal-overlay" style="display:none;" role="dialog" aria-labelledby="modal-title" aria-modal="true">
+        <div class="modal">
+            <h3 id="modal-title">⚠️ ยืนยันการรีเซ็ต</h3>
+            <p>ต้องการล้างข้อมูลฮีโร่ที่เล่นแล้วทั้งหมดหรือไม่?</p>
+            <p class="modal-warning">การดำเนินการนี้ไม่สามารถย้อนกลับได้</p>
+            <div class="modal-actions">
+                <button class="modal-btn cancel" id="modal-cancel">ยกเลิก</button>
+                <button class="modal-btn confirm" id="modal-confirm">ยืนยันรีเซ็ต</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <p>คลิกที่ฮีโร่เพื่อเช็คว่าเล่นแล้ว • ข้อมูลบันทึกอัตโนมัติ</p>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="heroes.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
