@@ -1154,6 +1154,15 @@ body.no-scroll {
   background: #e5b349;
   box-shadow: 0 0 10px var(--gold-glow);
 }
+.sync-btn.share-btn {
+  background: rgba(46, 204, 113, 0.2);
+  border: 1.5px solid rgba(46, 204, 113, 0.65);
+  color: #55efc4;
+}
+.sync-btn.share-btn:hover {
+  background: rgba(46, 204, 113, 0.35);
+  box-shadow: 0 0 10px rgba(46, 204, 113, 0.4);
+}
 .sync-btn.copy-btn {
   flex: 1;
   background: rgba(52, 152, 219, 0.2);
@@ -1171,6 +1180,16 @@ body.no-scroll {
 .sync-btn.leave-btn:hover {
   background: var(--danger-color);
   color: #fff;
+}
+.join-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.45rem;
+  line-height: 1.3;
+}
+.join-hint strong {
+  color: var(--gold);
 }
 .sync-options-grid {
   display: grid;

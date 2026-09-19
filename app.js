@@ -3,6 +3,7 @@
  * บันทึกฮีโร่ที่แต่ละทีมเลือกเล่นไปแล้ว เพื่อใช้ในการแบนไม่ให้เล่นซ้ำ (Global Ban Rule)
  * รองรับหลายทีม, สลับดูแต่ละทีม, ดูกระดานสรุปทุกทีม
  * ระบบ Live Sync (PeerJS WebRTC P2P) ซิงค์ข้ามมือถือ/คอมฯ แบบ Real-time ไม่ต้องมีเซิร์ฟเวอร์
+ * Flowborn รองรับการแบนแยกตำแหน่ง Carry / Mage ได้อย่างอิสระ
  */
 
 // ─── State Management ───
@@ -22,13 +23,27 @@ let currentRole = 'all';
 let currentStatus = 'all';
 let editingTeamId = null;
 
-// ─── Live Sync (PeerJS P2P) State ───
+// ─── Live Sync (PeerJS P2P) Configuration & State ───
 const PEER_PREFIX = 'rov-ban-room-';
+const PEER_CONFIG = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' }
+    ]
+  }
+};
+
 let peer = null;
 let currentRoomId = null;
 let isHost = false;
 let connections = []; // สำหรับโฮสต์: เก็บ conn ทุกคน / สำหรับเกสต์: เก็บ conn โฮสต์
 let myControlledTeamId = 'all'; // 'all' (กรรมการ) หรือ team.id ที่ตัวเองรับผิดชอบ
+let heartbeatTimer = null;
+let reconnectAttempts = 0;
 
 // ─── Toast Notifications ───
 function showToast(message, icon = 'ℹ️', duration = 3200) {
@@ -97,16 +112,10 @@ function getActiveTeam() {
   return team;
 }
 
+// Flowborn แบนแยกตำแหน่งได้อิสระ (ไม่ผูกติดกัน)
 function getActiveHeroesSet() {
   const team = getActiveTeam();
-  const set = new Set(team.heroes || []);
-  // กฎ Global Ban: หากทีมเล่น Flowborn สายใดสายหนึ่งแล้ว อีกสายหนึ่งจะถูกแบนด้วยทันที
-  if (set.has('flowborn_carry')) {
-    set.add('flowborn_mage');
-  } else if (set.has('flowborn_mage')) {
-    set.add('flowborn_carry');
-  }
-  return set;
+  return new Set(team.heroes || []);
 }
 
 function addTeam(name) {
@@ -124,7 +133,12 @@ function addTeam(name) {
   renderTeamsBar();
   renderHeroes();
   updateTeamSelectOptions();
-  broadcastState(`เพิ่มทีม "${cleanName}" เข้าระบบ`);
+
+  broadcastAction({
+    type: 'ACTION_ADD_TEAM',
+    team: newTeam,
+    actionDesc: `เพิ่มทีม "${cleanName}" เข้าระบบ`
+  });
 }
 
 function renameTeam(id, newName) {
@@ -136,7 +150,13 @@ function renameTeam(id, newName) {
     renderTeamsBar();
     updateProgress();
     updateTeamSelectOptions();
-    broadcastState(`เปลี่ยนชื่อทีม "${oldName}" เป็น "${team.name}"`);
+
+    broadcastAction({
+      type: 'ACTION_RENAME_TEAM',
+      teamId: id,
+      newName: team.name,
+      actionDesc: `เปลี่ยนชื่อทีม "${oldName}" เป็น "${team.name}"`
+    });
   }
 }
 
@@ -156,7 +176,12 @@ function deleteTeam(id) {
   renderTeamsBar();
   renderHeroes();
   updateTeamSelectOptions();
-  broadcastState(`ลบทีม "${deletedName}" ออกจากระบบ`);
+
+  broadcastAction({
+    type: 'ACTION_DELETE_TEAM',
+    teamId: id,
+    actionDesc: `ลบทีม "${deletedName}" ออกจากระบบ`
+  });
 }
 
 function switchTeam(id) {
@@ -174,7 +199,12 @@ function resetActiveTeam() {
     saveState();
     renderTeamsBar();
     renderHeroes();
-    broadcastState(`ล้างข้อมูลฮีโร่ของ "${team.name}" แล้ว`);
+
+    broadcastAction({
+      type: 'ACTION_RESET_TEAM',
+      teamId: team.id,
+      actionDesc: `ล้างข้อมูลฮีโร่ของ "${team.name}" แล้ว`
+    });
   }
 }
 
@@ -185,10 +215,14 @@ function resetAllTeams() {
   saveState();
   renderTeamsBar();
   renderHeroes();
-  broadcastState(`ล้างข้อมูลฮีโร่ทุกทีม (เริ่มแมตช์ใหม่)`);
+
+  broadcastAction({
+    type: 'ACTION_RESET_ALL',
+    actionDesc: `ล้างข้อมูลฮีโร่ทุกทีม (เริ่มแมตช์ใหม่)`
+  });
 }
 
-// ─── Toggle Hero (พร้อมการจำกัดสิทธิ์ทีมที่คุม) ───
+// ─── Toggle Hero (แบนแยกตำแหน่งอิสระ + ป้องกันข้อมูลชนกัน) ───
 function toggleHero(heroId) {
   // ตรวจสอบสิทธิ์การคุมทีม (Team Lock)
   if (myControlledTeamId !== 'all' && myControlledTeamId !== state.activeTeamId) {
@@ -205,55 +239,34 @@ function toggleHero(heroId) {
   const team = getActiveTeam();
   if (!team.heroes) team.heroes = [];
 
-  let isNowPlayed = false;
-  let heroObj = HEROES.find(h => h.id === heroId);
-  let heroName = heroObj ? heroObj.name : heroId;
+  const heroObj = HEROES.find(h => h.id === heroId);
+  const heroName = heroObj ? heroObj.name : heroId;
 
-  // กฎเฉพาะของ Flowborn: แข่งขันจริงในแมตช์จะหยิบได้เพียง 1 สายต่อทีม
-  if (heroId === 'flowborn_carry') {
-    const carryIdx = team.heroes.indexOf('flowborn_carry');
-    const mageIdx = team.heroes.indexOf('flowborn_mage');
+  const index = team.heroes.indexOf(heroId);
+  const isNowPlayed = (index === -1);
 
-    if (carryIdx !== -1) {
-      team.heroes.splice(carryIdx, 1);
-      isNowPlayed = false;
-    } else {
-      if (mageIdx !== -1) team.heroes.splice(mageIdx, 1);
-      team.heroes.push('flowborn_carry');
-      isNowPlayed = true;
-    }
-  } else if (heroId === 'flowborn_mage') {
-    const carryIdx = team.heroes.indexOf('flowborn_carry');
-    const mageIdx = team.heroes.indexOf('flowborn_mage');
-
-    if (mageIdx !== -1) {
-      team.heroes.splice(mageIdx, 1);
-      isNowPlayed = false;
-    } else {
-      if (carryIdx !== -1) team.heroes.splice(carryIdx, 1);
-      team.heroes.push('flowborn_mage');
-      isNowPlayed = true;
-    }
+  if (isNowPlayed) {
+    team.heroes.push(heroId);
   } else {
-    // ฮีโร่ทั่วไป
-    const index = team.heroes.indexOf(heroId);
-    isNowPlayed = (index === -1);
-    if (isNowPlayed) {
-      team.heroes.push(heroId);
-    } else {
-      team.heroes.splice(index, 1);
-    }
+    team.heroes.splice(index, 1);
   }
 
   saveState();
   renderTeamsBar();
   renderWithAnimation(heroId, isNowPlayed);
 
-  // Broadcast ให้เครื่องอื่นทราบแบบ Real-time
+  // Broadcast Action เฉพาะทีมนี้ เพื่อไม่ให้เขียนทับทีมอื่นเด็ดขาด
   const actionText = isNowPlayed
     ? `${team.name} แบน ${heroName} แล้ว`
     : `${team.name} ปลดแบน ${heroName}`;
-  broadcastState(actionText);
+
+  broadcastAction({
+    type: 'ACTION_TOGGLE_HERO',
+    teamId: team.id,
+    heroId: heroId,
+    isNowPlayed: isNowPlayed,
+    actionDesc: actionText
+  });
 }
 
 // ─── Debounce ───
@@ -404,22 +417,12 @@ function renderHeroes(animatingId = null, isNowPlayed = false) {
     card.dataset.id = hero.id;
     card.setAttribute('role', 'listitem');
 
-    // ข้อความแสตมป์แบนสำหรับ Flowborn
+    // ป้ายข้อความแบนแยกตำแหน่งอิสระสำหรับ Flowborn
     if (isPlayed) {
-      const activeTeam = getActiveTeam();
-      const heroesList = activeTeam.heroes || [];
       if (hero.id === 'flowborn_carry') {
-        if (heroesList.includes('flowborn_carry')) {
-          card.dataset.banLabel = '🚫 แบน (Carry)';
-        } else {
-          card.dataset.banLabel = '🚫 แบนคู่ (ใช้แล้ว)';
-        }
+        card.dataset.banLabel = '🚫 แบน (Carry)';
       } else if (hero.id === 'flowborn_mage') {
-        if (heroesList.includes('flowborn_mage')) {
-          card.dataset.banLabel = '🚫 แบน (Mage)';
-        } else {
-          card.dataset.banLabel = '🚫 แบนคู่ (ใช้แล้ว)';
-        }
+        card.dataset.banLabel = '🚫 แบน (Mage)';
       }
     }
 
@@ -650,7 +653,17 @@ function hideResetModal() {
   }
 }
 
-// ─── Live Sync (PeerJS P2P) Core Engine ───
+// ─── Live Sync (PeerJS P2P) Core Engine — Rock Solid Upgraded ───
+
+// Smart Room Code Sanitizer (รับทั้ง 7842, rov-7842, ROV-7842)
+function sanitizeRoomCode(raw) {
+  if (!raw) return '';
+  let clean = raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (clean.startsWith('ROV')) {
+    clean = clean.substring(3);
+  }
+  return clean ? 'ROV-' + clean : '';
+}
 
 function generateRoomCode() {
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -659,6 +672,29 @@ function generateRoomCode() {
     code += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return 'ROV-' + code;
+}
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (!currentRoomId) return;
+    if (isHost) {
+      connections.forEach(conn => {
+        if (conn && conn.open) conn.send({ type: 'PING' });
+      });
+    } else {
+      if (connections[0] && connections[0].open) {
+        connections[0].send({ type: 'PING' });
+      }
+    }
+  }, 10000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 }
 
 function updateSyncUI() {
@@ -713,13 +749,13 @@ function updateTeamSelectOptions() {
   });
 }
 
-function createRoom() {
+function createRoom(preferredCode = null) {
   if (typeof Peer === 'undefined') {
-    alert('กำลังโหลดระบบเครือข่าย กรุณาลองใหม่อีกครั้งใน 2-3 วินาที');
+    showToast('กำลังโหลดระบบเครือข่าย กรุณาลองใหม่อีกครั้งใน 1-2 วินาที', '⏳');
     return;
   }
 
-  const roomCode = generateRoomCode();
+  const roomCode = preferredCode ? sanitizeRoomCode(preferredCode) : generateRoomCode();
   const peerId = PEER_PREFIX + roomCode.toLowerCase();
 
   showToast(`กำลังสร้างห้อง ${roomCode}...`, '⏳');
@@ -728,12 +764,19 @@ function createRoom() {
     peer.destroy();
   }
 
-  peer = new Peer(peerId);
+  peer = new Peer(peerId, PEER_CONFIG);
 
   peer.on('open', (id) => {
     isHost = true;
     currentRoomId = roomCode;
     connections = [];
+    reconnectAttempts = 0;
+    try {
+      sessionStorage.setItem('rov_active_room', roomCode);
+      sessionStorage.setItem('rov_is_host', 'true');
+    } catch (e) {}
+
+    startHeartbeat();
     updateSyncUI();
     showToast(`สร้างห้อง ${roomCode} สำเร็จ!`, '🎉');
   });
@@ -742,7 +785,7 @@ function createRoom() {
     connections.push(conn);
 
     conn.on('open', () => {
-      // ส่งข้อมูลทีมทั้งหมดให้ผู้เข้าร่วมใหม่
+      // ส่งข้อมูลเต็มให้ผู้เข้าร่วมใหม่
       conn.send({
         type: 'INIT_STATE',
         teams: state.teams,
@@ -763,38 +806,47 @@ function createRoom() {
     });
 
     conn.on('error', (err) => {
-      console.warn('Connection error:', err);
+      console.warn('Host conn error:', err);
     });
   });
 
   peer.on('error', (err) => {
     console.error('Peer error:', err);
     if (err.type === 'unavailable-id') {
-      // สุ่มรหัสใหม่หากซ้ำ
-      setTimeout(createRoom, 300);
+      if (preferredCode) {
+        showToast(`รหัสห้อง ${roomCode} กำลังถูกใช้งานอยู่`, '⚠️');
+      } else {
+        setTimeout(() => createRoom(), 300);
+      }
     } else {
-      showToast('เกิดข้อผิดพลาดในการสร้างห้อง: ' + err.type, '⚠️');
+      showToast('เกิดข้อผิดพลาดในการเชื่อมต่อเน็ต: ' + err.type, '⚠️');
     }
   });
 }
 
-function joinRoom(targetCode) {
-  if (!targetCode) return;
-  const cleanCode = targetCode.trim().toUpperCase();
-  const peerId = PEER_PREFIX + cleanCode.toLowerCase();
-
-  if (typeof Peer === 'undefined') {
-    alert('กำลังโหลดระบบเครือข่าย กรุณาลองใหม่อีกครั้งใน 2-3 วินาที');
+function joinRoom(rawCode, isAutoReconnect = false) {
+  const cleanCode = sanitizeRoomCode(rawCode);
+  if (!cleanCode) {
+    showToast('กรุณากรอกรหัสห้องให้ถูกต้อง (เช่น 7842)', '⚠️');
     return;
   }
 
-  showToast(`กำลังเชื่อมต่อห้อง ${cleanCode}...`, '⏳');
+  const peerId = PEER_PREFIX + cleanCode.toLowerCase();
+
+  if (typeof Peer === 'undefined') {
+    showToast('กำลังโหลดระบบเครือข่าย กรุณาลองใหม่อีกครั้งใน 1-2 วินาที', '⏳');
+    return;
+  }
+
+  if (!isAutoReconnect) {
+    showToast(`กำลังเชื่อมต่อห้อง ${cleanCode}...`, '⏳');
+  }
 
   if (peer) {
     peer.destroy();
   }
 
-  peer = new Peer();
+  peer = new Peer(PEER_CONFIG);
 
   peer.on('open', () => {
     const conn = peer.connect(peerId, { reliable: true });
@@ -803,6 +855,14 @@ function joinRoom(targetCode) {
       isHost = false;
       currentRoomId = cleanCode;
       connections = [conn];
+      reconnectAttempts = 0;
+
+      try {
+        sessionStorage.setItem('rov_active_room', cleanCode);
+        sessionStorage.setItem('rov_is_host', 'false');
+      } catch (e) {}
+
+      startHeartbeat();
       updateSyncUI();
       showToast(`เข้าร่วมห้อง ${cleanCode} สำเร็จ!`, '🎉');
       closeSyncModal();
@@ -813,23 +873,36 @@ function joinRoom(targetCode) {
     });
 
     conn.on('close', () => {
-      disconnectRoom(false);
-      showToast(`การเชื่อมต่อกับห้อง ${cleanCode} สิ้นสุดลง`, '⚠️');
+      stopHeartbeat();
+      connections = [];
+      updateSyncUI();
+
+      // ลองเชื่อมต่อใหม่อัตโนมัติ (Auto-retry 3 ครั้ง)
+      if (reconnectAttempts < 3) {
+        reconnectAttempts++;
+        setTimeout(() => {
+          if (currentRoomId) joinRoom(currentRoomId, true);
+        }, 1500);
+      } else {
+        disconnectRoom(false);
+        showToast(`หลุดจากการเชื่อมต่อกับห้อง ${cleanCode}`, '⚠️');
+      }
     });
 
     conn.on('error', (err) => {
-      console.error('Join conn error:', err);
-      showToast('ไม่สามารถเชื่อมต่อห้องนี้ได้ ตรวจสอบรหัสห้องอีกครั้ง', '⚠️');
+      console.warn('Guest conn error:', err);
+      showToast('ไม่สามารถเชื่อมต่อโฮสต์ได้ กรุณาตรวจรหัสห้องอีกครั้ง', '⚠️');
     });
   });
 
   peer.on('error', (err) => {
-    console.error('Peer error:', err);
-    showToast('ไม่พบห้องที่ระบุ หรือห้องถูกปิดแล้ว', '⚠️');
+    console.error('Peer join error:', err);
+    showToast(`ไม่พบห้อง ${cleanCode} (โฮสต์ยังไม่เปิดห้อง)`, '⚠️');
   });
 }
 
 function disconnectRoom(manual = true) {
+  stopHeartbeat();
   if (peer) {
     peer.destroy();
     peer = null;
@@ -837,37 +910,51 @@ function disconnectRoom(manual = true) {
   connections = [];
   currentRoomId = null;
   isHost = false;
+  reconnectAttempts = 0;
+
+  try {
+    sessionStorage.removeItem('rov_active_room');
+    sessionStorage.removeItem('rov_is_host');
+  } catch (e) {}
+
   updateSyncUI();
   if (manual) showToast('ออกจากห้องแล้ว (กลับสู่โหมดออฟไลน์)', 'ℹ️');
 }
 
-function broadcastState(actionDesc = '') {
+// Broadcast Action-Based (ป้องกันข้อมูลชนกัน 100%)
+function broadcastAction(actionData) {
   if (!currentRoomId) return;
-
-  const payload = {
-    type: 'SYNC_STATE',
-    teams: state.teams,
-    actionDesc,
-    sourceTeamId: state.activeTeamId
-  };
 
   if (isHost) {
     connections.forEach(conn => {
       if (conn && conn.open) {
-        conn.send(payload);
+        conn.send(actionData);
       }
     });
   } else {
     if (connections[0] && connections[0].open) {
-      connections[0].send(payload);
+      connections[0].send(actionData);
     }
   }
 }
 
+// ประมวลผล Action ที่ได้รับจากเครื่องอื่น
 function handleIncomingData(data, senderConn) {
   if (!data || !data.type) return;
 
-  if (data.type === 'SYNC_STATE' || data.type === 'INIT_STATE') {
+  // Heartbeat ping/pong (รักษาการเชื่อมต่อบนมือถือ)
+  if (data.type === 'PING') {
+    if (senderConn && senderConn.open) {
+      senderConn.send({ type: 'PONG' });
+    }
+    return;
+  }
+  if (data.type === 'PONG') {
+    return;
+  }
+
+  // 1. เชื่อมต่อครั้งแรก: รับ State ทีมทั้งหมดจากโฮสต์
+  if (data.type === 'INIT_STATE') {
     if (Array.isArray(data.teams)) {
       state.teams = data.teams;
       saveState();
@@ -879,19 +966,139 @@ function handleIncomingData(data, senderConn) {
         renderOverviewModal();
       }
     }
+    if (data.actionDesc) showToast(data.actionDesc, '🎉');
+    return;
+  }
 
-    if (data.actionDesc) {
-      showToast(data.actionDesc, '⚔️');
+  // 2. Action: ติ๊กแบนฮีโร่ (Conflict-Free: อัปเดตเฉพาะทีมเป้าหมาย ไม่กระทบทีมอื่น)
+  if (data.type === 'ACTION_TOGGLE_HERO') {
+    const targetTeam = state.teams.find(t => t.id === data.teamId);
+    if (targetTeam) {
+      if (!targetTeam.heroes) targetTeam.heroes = [];
+      const idx = targetTeam.heroes.indexOf(data.heroId);
+      if (data.isNowPlayed && idx === -1) {
+        targetTeam.heroes.push(data.heroId);
+      } else if (!data.isNowPlayed && idx !== -1) {
+        targetTeam.heroes.splice(idx, 1);
+      }
+      saveState();
+      renderTeamsBar();
+      if (state.activeTeamId === data.teamId) {
+        renderWithAnimation(data.heroId, data.isNowPlayed);
+      }
+      updateProgress();
+      if (document.getElementById('overview-modal-overlay')?.classList.contains('active')) {
+        renderOverviewModal();
+      }
+      if (data.actionDesc) showToast(data.actionDesc, '⚔️');
     }
+  }
 
-    // ถ้าโฮสต์ได้รับข้อมูลจากลูกห้อง ให้กระจาย (Relay) ไปยังลูกห้องคนอื่นๆ ทันที
-    if (isHost && data.type === 'SYNC_STATE') {
-      connections.forEach(conn => {
-        if (conn !== senderConn && conn.open) {
-          conn.send(data);
-        }
-      });
+  // 3. Action: เพิ่มทีมใหม่
+  else if (data.type === 'ACTION_ADD_TEAM') {
+    if (data.team && !state.teams.some(t => t.id === data.team.id)) {
+      state.teams.push(data.team);
+      saveState();
+      renderTeamsBar();
+      updateTeamSelectOptions();
+      if (document.getElementById('overview-modal-overlay')?.classList.contains('active')) {
+        renderOverviewModal();
+      }
+      if (data.actionDesc) showToast(data.actionDesc, '➕');
     }
+  }
+
+  // 4. Action: แก้ไขชื่อทีม
+  else if (data.type === 'ACTION_RENAME_TEAM') {
+    const targetTeam = state.teams.find(t => t.id === data.teamId);
+    if (targetTeam) {
+      targetTeam.name = data.newName;
+      saveState();
+      renderTeamsBar();
+      updateProgress();
+      updateTeamSelectOptions();
+      if (document.getElementById('overview-modal-overlay')?.classList.contains('active')) {
+        renderOverviewModal();
+      }
+      if (data.actionDesc) showToast(data.actionDesc, '✏️');
+    }
+  }
+
+  // 5. Action: ลบทีม
+  else if (data.type === 'ACTION_DELETE_TEAM') {
+    state.teams = state.teams.filter(t => t.id !== data.teamId);
+    if (state.activeTeamId === data.teamId && state.teams.length > 0) {
+      state.activeTeamId = state.teams[0].id;
+    }
+    saveState();
+    renderTeamsBar();
+    renderHeroes();
+    updateTeamSelectOptions();
+    if (document.getElementById('overview-modal-overlay')?.classList.contains('active')) {
+      renderOverviewModal();
+    }
+    if (data.actionDesc) showToast(data.actionDesc, '🗑️');
+  }
+
+  // 6. Action: รีเซ็ตเฉพาะทีม
+  else if (data.type === 'ACTION_RESET_TEAM') {
+    const targetTeam = state.teams.find(t => t.id === data.teamId);
+    if (targetTeam) {
+      targetTeam.heroes = [];
+      saveState();
+      renderTeamsBar();
+      if (state.activeTeamId === data.teamId) renderHeroes();
+      updateProgress();
+      if (document.getElementById('overview-modal-overlay')?.classList.contains('active')) {
+        renderOverviewModal();
+      }
+      if (data.actionDesc) showToast(data.actionDesc, '🔄');
+    }
+  }
+
+  // 7. Action: รีเซ็ตทุกทีม
+  else if (data.type === 'ACTION_RESET_ALL') {
+    state.teams.forEach(t => {
+      t.heroes = [];
+    });
+    saveState();
+    renderTeamsBar();
+    renderHeroes();
+    updateProgress();
+    if (document.getElementById('overview-modal-overlay')?.classList.contains('active')) {
+      renderOverviewModal();
+    }
+    if (data.actionDesc) showToast(data.actionDesc, '🔄');
+  }
+
+  // โฮสต์กระจาย Action ไปให้ลูกห้องเครื่องอื่นๆ ต่อทันที (P2P Mesh Relay)
+  if (isHost) {
+    connections.forEach(conn => {
+      if (conn !== senderConn && conn.open) {
+        conn.send(data);
+      }
+    });
+  }
+}
+
+// แชร์ด่วน 1 คลิก (Web Share API)
+function shareRoomInvite() {
+  if (!currentRoomId) return;
+  const baseUrl = window.location.origin + window.location.pathname;
+  const inviteUrl = `${baseUrl}?room=${currentRoomId}`;
+
+  if (navigator.share) {
+    navigator.share({
+      title: 'ROV Global Ban Tracker',
+      text: `เข้าร่วมห้องแข่ง ROV Global Ban: ${currentRoomId} เพื่อดูและบันทึกฮีโร่สดๆ`,
+      url: inviteUrl
+    }).then(() => {
+      showToast('แชร์ลิงก์ห้องสำเร็จ', '🚀');
+    }).catch(() => {
+      copyRoomInviteLink();
+    });
+  } else {
+    copyRoomInviteLink();
   }
 }
 
@@ -959,7 +1166,7 @@ function setupEventListeners() {
     });
   }
 
-  // Keyboard shortcut: / เพื่อค้นหา, Escape เพื่อปิด modal
+  // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
     const tag = document.activeElement.tagName.toLowerCase();
     if (e.key === '/' && tag !== 'input' && tag !== 'textarea') {
@@ -1087,7 +1294,7 @@ function setupEventListeners() {
   if (closeSyncBtn) closeSyncBtn.addEventListener('click', closeSyncModal);
 
   const createRoomBtn = document.getElementById('create-room-btn');
-  if (createRoomBtn) createRoomBtn.addEventListener('click', createRoom);
+  if (createRoomBtn) createRoomBtn.addEventListener('click', () => createRoom());
 
   const joinRoomBtn = document.getElementById('join-room-btn');
   const joinRoomInput = document.getElementById('join-room-input');
@@ -1099,6 +1306,9 @@ function setupEventListeners() {
       if (e.key === 'Enter') joinRoom(joinRoomInput.value);
     });
   }
+
+  const shareRoomLinkBtn = document.getElementById('share-room-link-btn');
+  if (shareRoomLinkBtn) shareRoomLinkBtn.addEventListener('click', shareRoomInvite);
 
   const copyRoomLinkBtn = document.getElementById('copy-room-link-btn');
   if (copyRoomLinkBtn) copyRoomLinkBtn.addEventListener('click', copyRoomInviteLink);
@@ -1147,6 +1357,16 @@ function setupEventListeners() {
       if (e.target === syncModalOverlay) closeSyncModal();
     });
   }
+
+  // ป้องกันการหลุดเมื่อสลับแอปบนมือถือ (Auto-reconnect on visibilitychange)
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && currentRoomId && !isHost) {
+      if (!connections[0] || !connections[0].open) {
+        showToast('ตรวจพบการพักหน้าจอ กำลังต่อห้องเดิมอัตโนมัติ...', '⏳', 2000);
+        joinRoom(currentRoomId, true);
+      }
+    }
+  });
 }
 
 // ─── Initialization ───
@@ -1163,7 +1383,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateSyncUI();
   updateTeamSelectOptions();
 
-  // ตรวจสอบ URL Query Parameter ว่ามี ?room=XXXX มาด้วยหรือไม่ (Auto-Join)
+  // 1. ตรวจสอบ URL Query Parameter ว่ามี ?room=XXXX มาด้วยหรือไม่ (Auto-Join จากลิงก์)
   try {
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
@@ -1171,8 +1391,22 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => {
         joinRoom(roomParam);
       }, 500);
+      return;
     }
   } catch (e) {
     console.warn('Cannot parse URL query params:', e);
   }
+
+  // 2. ตรวจสอบว่าก่อนหน้านี้เคยสร้างห้องค้างไว้หรือไม่ (Host Session Persistence)
+  try {
+    const savedRoom = sessionStorage.getItem('rov_active_room');
+    const savedIsHost = sessionStorage.getItem('rov_is_host') === 'true';
+    if (savedRoom) {
+      if (savedIsHost) {
+        setTimeout(() => createRoom(savedRoom), 400);
+      } else {
+        setTimeout(() => joinRoom(savedRoom, true), 400);
+      }
+    }
+  } catch (e) {}
 });
